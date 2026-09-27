@@ -2437,6 +2437,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "no prompt cache/checkpoints, bg reclaim on (LLAMA_MMAP_COLD=0 off)",
         [](common_params & params) {
             params.ultra_low = true;
+            // no fit probe: it loads the model and allocates a full second
+            // context just to measure memory, that alone can OOM a phone
+            params.fit_params = false;
             // allow high ctx, do not cap. 0 means auto
             if (params.n_ctx == 0) {
                 params.n_ctx = 2048;
