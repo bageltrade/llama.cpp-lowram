@@ -10,6 +10,7 @@
 #include <array>
 #include <cinttypes>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <regex>
@@ -1426,8 +1427,16 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
                 }
             }
 
-            // fast start, low RAM: prefetch first 256 MB only, stream rest from disk
-            const size_t prefetch_size = prefetch && use_mmap ? 256u * 1024u * 1024u : 0;
+            // fast start, low RAM: prefetch a bounded prefix, stream the rest.
+            // LLAMA_MMAP_PREFETCH_MB overrides (0 = pure streaming)
+            size_t prefetch_size = 0;
+            if (prefetch && use_mmap) {
+                prefetch_size = 256u * 1024u * 1024u;
+                if (const char * env = std::getenv("LLAMA_MMAP_PREFETCH_MB")) {
+                    const long mb = std::strtol(env, nullptr, 10);
+                    prefetch_size = mb > 0 ? (size_t) mb * 1024u * 1024u : 0u;
+                }
+            }
 
             std::unique_ptr<llama_mmap> mapping = std::make_unique<llama_mmap>(file.get(), prefetch_size, is_numa,
                     lazy.for_file(idx));

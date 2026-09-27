@@ -2432,7 +2432,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_NO_HOST"));
     add_opt(common_arg(
         {"--ultra-low", "--low-ram"},
-        "ultra low RAM: stream Q4 from disk, high ctx ok, q8_0/q4_0 KV auto, flash attn on, lazy on, mmap (put last)",
+        "ultra low RAM: stream Q4 from disk, 64MB prefetch, cold-page reclaim, no repack copies,\n"
+        "high ctx ok with q4_0 KV, flash attn on, lazy on, mmap (put last)",
         [](common_params & params) {
             params.ultra_low = true;
             // allow high ctx, do not cap. 0 means auto
@@ -2449,14 +2450,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.no_kv_offload = false;
             params.warmup = false;
             params.swa_full = false;
-            params.no_extra_bufts = false;
+            // no repacked weight copies: extra bufts duplicate resident weights
+            params.no_extra_bufts = true;
             params.fit_params_min_ctx = 512;
+#ifndef _WIN32
+            // small warm start, rest streams from disk (user env wins if already set)
+            if (!std::getenv("LLAMA_MMAP_PREFETCH_MB")) {
+                setenv("LLAMA_MMAP_PREFETCH_MB", "64", 0);
+            }
+#endif
             if (params.n_ctx > 8192) {
                 // high ctx tier: q4_0 KV + tiny batches, keeps RAM low
                 params.cache_type_k = GGML_TYPE_Q4_0;
                 params.cache_type_v = GGML_TYPE_Q4_0;
-                params.n_batch = std::min(params.n_batch, 256);
-                params.n_ubatch = std::min(params.n_ubatch, 64);
+                params.n_batch = std::min(params.n_batch, 128);
+                params.n_ubatch = std::min(params.n_ubatch, 32);
             } else {
                 params.cache_type_k = GGML_TYPE_Q8_0;
                 params.cache_type_v = GGML_TYPE_Q8_0;

@@ -10,6 +10,14 @@
 #include <stdexcept>
 #include <cerrno>
 #include <algorithm>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+
+#ifndef MADV_COLD
+    #define MADV_COLD 20
+#endif
 
 #ifdef __has_include
     #if __has_include(<unistd.h>)
@@ -466,6 +474,62 @@ struct llama_mmap::impl {
 #ifdef _POSIX_MAPPED_FILES
     std::vector<std::pair<size_t, size_t>> mapped_fragments;
 
+    // background thread: mark streamed weight pages cold so the kernel reclaims
+    // them under memory pressure, keeps RAM low without losing hot pages
+    std::mutex    cold_mtx;
+    std::condition_variable cold_cv;
+    std::thread   cold_thread;
+    bool          cold_stop = false;
+    bool          cold_ok   = true;
+    size_t        cold_hot  = 0;
+
+    void start_cold(size_t prefetch) {
+#ifdef __linux__
+        const char * en = std::getenv("LLAMA_MMAP_COLD");
+        if (en && std::atoi(en) == 0) {
+            return;
+        }
+        int sec = 5;
+        if (const char * es = std::getenv("LLAMA_MMAP_COLD_SEC")) {
+            const int v = std::atoi(es);
+            if (v > 0) {
+                sec = v;
+            }
+        }
+        const size_t page_size = sysconf(_SC_PAGESIZE);
+        cold_hot = (prefetch + page_size - 1) & ~(page_size - 1);
+        cold_thread = std::thread([this, sec] {
+            std::unique_lock<std::mutex> lk(cold_mtx);
+            while (true) {
+                if (cold_cv.wait_for(lk, std::chrono::seconds(sec), [this] { return cold_stop; })) {
+                    break;
+                }
+                if (!cold_ok) {
+                    continue;
+                }
+                auto frags = mapped_fragments;
+                lk.unlock();
+                const size_t page_size = sysconf(_SC_PAGESIZE);
+                for (const auto & frag : frags) {
+                    size_t beg = std::max(frag.first, cold_hot);
+                    size_t end = frag.second;
+                    beg = (beg + page_size - 1) & ~(page_size - 1);
+                    end = end & ~(page_size - 1);
+                    if (beg >= end) {
+                        continue;
+                    }
+                    if (madvise((char *) addr + beg, end - beg, MADV_COLD) != 0) {
+                        if (errno == EINVAL || errno == ENOSYS) {
+                            cold_ok = false;
+                        }
+                    }
+                }
+                lk.lock();
+            }
+        });
+#endif
+    }
+
     impl(struct llama_file * file, size_t prefetch, bool numa, const llama_mmap::ranges & lazy_ranges) {
         size = file->size();
         int fd = file->file_id();
@@ -516,6 +580,8 @@ struct llama_mmap::impl {
         }
 
         mapped_fragments.emplace_back(0, file->size());
+
+        start_cold(prefetch);
     }
 
     static void align_range(size_t * first, size_t * last, size_t page_size) {
@@ -531,6 +597,7 @@ struct llama_mmap::impl {
     }
 
     void unmap_fragment(size_t first, size_t last) {
+        std::lock_guard<std::mutex> cold_lk(cold_mtx);
         int page_size = sysconf(_SC_PAGESIZE);
         align_range(&first, &last, page_size);
         size_t len = last - first;
@@ -567,6 +634,14 @@ struct llama_mmap::impl {
     }
 
     ~impl() {
+        {
+            std::lock_guard<std::mutex> lk(cold_mtx);
+            cold_stop = true;
+        }
+        cold_cv.notify_all();
+        if (cold_thread.joinable()) {
+            cold_thread.join();
+        }
         for (const auto & frag : mapped_fragments) {
             if (munmap((char *) addr + frag.first, frag.second - frag.first)) {
                 LLAMA_LOG_WARN("warning: munmap failed: %s\n", strerror(errno));
