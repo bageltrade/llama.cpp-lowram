@@ -2459,6 +2459,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 setenv("LLAMA_MMAP_PREFETCH_MB", "64", 0);
             }
 #endif
+#ifdef __ANDROID__
+            // phones throttle with all cores loaded, 4 is smoother
+            if (params.cpuparams.n_threads <= 0) {
+                params.cpuparams.n_threads = 4;
+            }
+#endif
             if (params.n_ctx > 8192) {
                 // high ctx tier: q4_0 KV + tiny batches, keeps RAM low
                 params.cache_type_k = GGML_TYPE_Q4_0;
@@ -2473,6 +2479,41 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_env("LLAMA_ARG_ULTRA_LOW"));
+    add_opt(common_arg(
+        {"--ultra-balanced", "--low-balanced"},
+        "balanced preset: stream from disk, 256MB warmup, repack on, q8_0 KV,\n"
+        "flash attn on, small batches (put last)",
+        [](common_params & params) {
+            if (params.n_ctx == 0) {
+                params.n_ctx = 2048;
+            }
+            params.n_parallel = 1;
+            params.n_sequences = 1;
+            params.n_outputs_max = 1;
+            params.n_outputs_max_per_seq = 1;
+            params.cache_type_k = GGML_TYPE_Q8_0;
+            params.cache_type_v = GGML_TYPE_Q8_0;
+            params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+            params.lazy_mode = LLAMA_LAZY_MODE_ON;
+            params.load_mode = LLAMA_LOAD_MODE_MMAP;
+            params.warmup = false;
+            params.swa_full = false;
+            params.no_extra_bufts = false; // repack on: faster math, a bit more RAM
+            params.n_batch = std::min(params.n_batch, 512);
+            params.n_ubatch = std::min(params.n_ubatch, 128);
+            params.fit_params_min_ctx = 512;
+#ifndef _WIN32
+            if (!std::getenv("LLAMA_MMAP_PREFETCH_MB")) {
+                setenv("LLAMA_MMAP_PREFETCH_MB", "256", 0);
+            }
+#endif
+#ifdef __ANDROID__
+            if (params.cpuparams.n_threads <= 0) {
+                params.cpuparams.n_threads = 4;
+            }
+#endif
+        }
+    ).set_env("LLAMA_ARG_ULTRA_BALANCED"));
     add_opt(common_arg(
         {"-ctk", "--cache-type-k"}, "TYPE",
         string_format(
