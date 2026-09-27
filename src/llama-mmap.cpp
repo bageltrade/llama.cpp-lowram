@@ -14,6 +14,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <atomic>
 
 #ifndef MADV_COLD
     #define MADV_COLD 20
@@ -477,19 +478,21 @@ struct llama_mmap::impl {
 #ifdef _POSIX_MAPPED_FILES
     std::vector<std::pair<size_t, size_t>> mapped_fragments;
 
-    // background thread: mark streamed weight pages cold so the kernel reclaims
-    // them under memory pressure, keeps RAM low without losing hot pages
+    // opt-in background reclaim (LLAMA_MMAP_COLD=1/2): mark streamed weight pages
+    // cold so the kernel reclaims them under memory pressure
     std::mutex    cold_mtx;
     std::condition_variable cold_cv;
     std::thread   cold_thread;
     bool          cold_stop = false;
-    bool          cold_ok   = true;
+    std::atomic<bool> cold_ok{true};
     size_t        cold_hot  = 0;
 
     void start_cold(size_t prefetch) {
 #ifdef __linux__
+        // off by default: flagging live weights every cycle causes refault
+        // storms mid-decode, the kernel already reclaims clean file pages first
         const char * en = std::getenv("LLAMA_MMAP_COLD");
-        const int mode = en ? std::atoi(en) : 1;
+        const int mode = en ? std::atoi(en) : 0;
         if (mode == 0) {
             return;
         }
@@ -547,9 +550,10 @@ struct llama_mmap::impl {
         int flags = MAP_SHARED;
         if (numa) { prefetch = 0; }
 #ifdef __linux__
-        // use RANDOM to avoid readahead, keeps RAM low, streams from disk
-        if (posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM)) {
-            LLAMA_LOG_WARN("warning: posix_fadvise(.., POSIX_FADV_RANDOM) failed: %s\n",
+        // weights are scanned in order every token, readahead turns sync 4KB
+        // faults into async windows, this is the main smoothness lever
+        if (posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL)) {
+            LLAMA_LOG_WARN("warning: posix_fadvise(.., POSIX_FADV_SEQUENTIAL) failed: %s\n",
                     strerror(errno));
         }
         // no MAP_POPULATE, fault pages in on demand only
@@ -576,9 +580,6 @@ struct llama_mmap::impl {
             for (const auto & range : ranges_complement(lazy_ranges, std::min(file->size(), prefetch))) {
                 advise(range.first, range.second, POSIX_MADV_WILLNEED, "POSIX_MADV_WILLNEED");
             }
-        } else {
-            // no prefetch, stream from disk, tell kernel to not readahead
-            advise(0, file->size(), POSIX_MADV_RANDOM, "POSIX_MADV_RANDOM");
         }
         for (const auto & range : lazy_ranges) {
             advise(range.first, range.second, POSIX_MADV_RANDOM, "POSIX_MADV_RANDOM");

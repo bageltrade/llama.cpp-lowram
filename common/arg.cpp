@@ -2432,8 +2432,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_NO_HOST"));
     add_opt(common_arg(
         {"--ultra-low", "--low-ram"},
-        "ultra low RAM: stream Q4 from disk, 64MB prefetch, cold-page reclaim, no repack copies,\n"
-        "high ctx ok with q4_0 KV, flash attn on, lazy on, mmap (put last)",
+        "ultra low RAM: stream Q4 from disk, 64MB prefetch, no repack copies,\n"
+        "high ctx ok with q4_0 KV, flash attn on, lazy on, mmap (put last),\n"
+        "env LLAMA_MMAP_COLD=1 for extra background reclaim",
         [](common_params & params) {
             params.ultra_low = true;
             // allow high ctx, do not cap. 0 means auto
