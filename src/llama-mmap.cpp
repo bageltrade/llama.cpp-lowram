@@ -18,6 +18,9 @@
 #ifndef MADV_COLD
     #define MADV_COLD 20
 #endif
+#ifndef MADV_PAGEOUT
+    #define MADV_PAGEOUT 21
+#endif
 
 #ifdef __has_include
     #if __has_include(<unistd.h>)
@@ -486,9 +489,12 @@ struct llama_mmap::impl {
     void start_cold(size_t prefetch) {
 #ifdef __linux__
         const char * en = std::getenv("LLAMA_MMAP_COLD");
-        if (en && std::atoi(en) == 0) {
+        const int mode = en ? std::atoi(en) : 1;
+        if (mode == 0) {
             return;
         }
+        // 1 = MADV_COLD (soft), 2 = MADV_PAGEOUT (hard, may stall)
+        const int advice = mode == 2 ? MADV_PAGEOUT : MADV_COLD;
         int sec = 5;
         if (const char * es = std::getenv("LLAMA_MMAP_COLD_SEC")) {
             const int v = std::atoi(es);
@@ -498,7 +504,7 @@ struct llama_mmap::impl {
         }
         const size_t page_size = sysconf(_SC_PAGESIZE);
         cold_hot = (prefetch + page_size - 1) & ~(page_size - 1);
-        cold_thread = std::thread([this, sec] {
+        cold_thread = std::thread([this, sec, advice] {
             std::unique_lock<std::mutex> lk(cold_mtx);
             while (true) {
                 if (cold_cv.wait_for(lk, std::chrono::seconds(sec), [this] { return cold_stop; })) {
@@ -510,6 +516,11 @@ struct llama_mmap::impl {
                 auto frags = mapped_fragments;
                 lk.unlock();
                 const size_t page_size = sysconf(_SC_PAGESIZE);
+                // re-warm head so hot layers survive memory pressure
+                const size_t hot = std::min(cold_hot, size);
+                if (hot >= page_size) {
+                    madvise(addr, hot, MADV_WILLNEED);
+                }
                 for (const auto & frag : frags) {
                     size_t beg = std::max(frag.first, cold_hot);
                     size_t end = frag.second;
@@ -518,7 +529,7 @@ struct llama_mmap::impl {
                     if (beg >= end) {
                         continue;
                     }
-                    if (madvise((char *) addr + beg, end - beg, MADV_COLD) != 0) {
+                    if (madvise((char *) addr + beg, end - beg, advice) != 0) {
                         if (errno == EINVAL || errno == ENOSYS) {
                             cold_ok = false;
                         }
