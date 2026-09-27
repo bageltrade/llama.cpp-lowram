@@ -2434,7 +2434,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--ultra-low", "--low-ram"},
         "ultra low RAM: stream Q4 from disk, 64MB prefetch, no repack copies,\n"
         "high ctx ok with q4_0 KV, flash attn on, lazy on, mmap (put last),\n"
-        "env LLAMA_MMAP_COLD=1 for extra background reclaim",
+        "no prompt cache/checkpoints, bg reclaim on (LLAMA_MMAP_COLD=0 off)",
         [](common_params & params) {
             params.ultra_low = true;
             // allow high ctx, do not cap. 0 means auto
@@ -2454,6 +2454,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             // no repacked weight copies: extra bufts duplicate resident weights
             params.no_extra_bufts = true;
             params.fit_params_min_ctx = 512;
+            // CPU only, keeps weights zero-copy in mmap
+            params.n_gpu_layers = 0;
+            // prompt cache and context checkpoints hold extra KV copies in
+            // RAM and their restore paths can abort, disable for chat
+            params.cache_ram_mib = 0;
+            params.n_ctx_checkpoints = 0;
 #ifndef _WIN32
             // small warm start, rest streams from disk (user env wins if already set)
             if (!std::getenv("LLAMA_MMAP_PREFETCH_MB")) {

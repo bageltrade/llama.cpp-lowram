@@ -489,16 +489,15 @@ struct llama_mmap::impl {
 
     void start_cold(size_t prefetch) {
 #ifdef __linux__
-        // off by default: flagging live weights every cycle causes refault
-        // storms mid-decode, the kernel already reclaims clean file pages first
+        // reclaim streamed weight pages so the phone does not OOM-kill us,
+        // off with LLAMA_MMAP_COLD=0, 2 = MADV_PAGEOUT (hard, may stall)
         const char * en = std::getenv("LLAMA_MMAP_COLD");
-        const int mode = en ? std::atoi(en) : 0;
+        const int mode = en ? std::atoi(en) : 1;
         if (mode == 0) {
             return;
         }
-        // 1 = MADV_COLD (soft), 2 = MADV_PAGEOUT (hard, may stall)
         const int advice = mode == 2 ? MADV_PAGEOUT : MADV_COLD;
-        int sec = 5;
+        int sec = 10;
         if (const char * es = std::getenv("LLAMA_MMAP_COLD_SEC")) {
             const int v = std::atoi(es);
             if (v > 0) {
@@ -519,11 +518,6 @@ struct llama_mmap::impl {
                 auto frags = mapped_fragments;
                 lk.unlock();
                 const size_t page_size = sysconf(_SC_PAGESIZE);
-                // re-warm head so hot layers survive memory pressure
-                const size_t hot = std::min(cold_hot, size);
-                if (hot >= page_size) {
-                    madvise(addr, hot, MADV_WILLNEED);
-                }
                 for (const auto & frag : frags) {
                     size_t beg = std::max(frag.first, cold_hot);
                     size_t end = frag.second;
