@@ -1327,6 +1327,26 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         }
     }
 
+    if (params.no_think) {
+        // suppress thinking tokens so the model answers directly
+        int n_suppressed = 0;
+        for (llama_token i = 0; i < llama_vocab_n_tokens(vocab); i++) {
+            std::string low = common_token_to_piece(vocab, i);
+            for (auto & c : low) {
+                if (c >= 'A' && c <= 'Z') {
+                    c += ('a' - 'A');
+                }
+            }
+            if (low.find("<think>") != std::string::npos ||
+                low.find("</think>") != std::string::npos ||
+                low.find("<|thought|>") != std::string::npos) {
+                params.sampling.logit_bias.push_back({i, -INFINITY});
+                n_suppressed++;
+            }
+        }
+        COM_INF("suppressed %d thinking tokens\n", n_suppressed);
+    }
+
     if (params.sampling.ignore_eos) {
         // add EOG biases to the active set of logit biases
         params.sampling.logit_bias.insert(

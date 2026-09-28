@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <clocale>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <string>
@@ -118,13 +119,39 @@ int llama_chat(int argc, char ** argv) {
         llama_set_n_threads(ctx, nt, ntb);
     }
 
+    if (params.no_think) {
+        // suppress thinking tokens so the model answers directly
+        int n_suppressed = 0;
+        const int n_vocab = llama_vocab_n_tokens(vocab);
+        for (llama_token i = 0; i < n_vocab; i++) {
+            char buf[256];
+            const int n = llama_token_to_piece(vocab, i, buf, sizeof(buf), 0, true);
+            if (n <= 0) {
+                continue;
+            }
+            std::string low(buf, n);
+            for (auto & c : low) {
+                if (c >= 'A' && c <= 'Z') {
+                    c += ('a' - 'A');
+                }
+            }
+            if (low.find("<think>") != std::string::npos ||
+                low.find("</think>") != std::string::npos ||
+                low.find("<|thought|>") != std::string::npos) {
+                params.sampling.logit_bias.push_back({i, -INFINITY});
+                n_suppressed++;
+            }
+        }
+        LOG_INF("llama-chat: suppressed %d thinking tokens\n", n_suppressed);
+    }
+
     common_sampler * smpl = common_sampler_init(model, params.sampling);
 
     auto tmpls = common_chat_templates_init(model, params.chat_template);
     const bool has_tmpl = common_chat_templates_was_explicit(tmpls.get());
     if (!has_tmpl) {
         LOG_WRN("llama-chat: model has no chat template, using fallback, replies may be worse\n");
-    } else {
+    } else if (!params.raw_chat) {
         LOG_INF("llama-chat: chat template example:\n%s\n",
             common_chat_format_example(tmpls.get(), params.use_jinja, params.default_template_kwargs).c_str());
     }
@@ -181,10 +208,25 @@ int llama_chat(int argc, char ** argv) {
         um.content = user_text;
         msgs.push_back(um);
 
-        // render and tokenize: feed only the new delta when the render is
-        // prefix-stable, else clear the KV and re-encode (trim oldest msgs)
+        // raw mode mirrors a direct prompt: user text plus an answer cue,
+        // no template, history lives only in the KV
+        // template mode feeds only the new delta when the render is
+        // prefix-stable, else clears the KV and re-encodes (trims oldest)
         std::vector<llama_token> toks;
         bool reset = false;
+        if (params.raw_chat) {
+            std::string turn;
+            if (n_kv() == 0 && !params.system_prompt.empty()) {
+                turn += params.system_prompt + "\n";
+            }
+            turn += user_text + "\n(Answer directly without internal thoughts.)\nAssistant: ";
+            toks = common_tokenize(ctx, turn, n_kv() == 0, true);
+            if (n_kv() + (int) toks.size() > limit) {
+                LOG("\n<<context full, clearing memory>>\n");
+                llama_memory_clear(mem, true);
+                toks = common_tokenize(ctx, turn, true, true);
+            }
+        } else
         while (true) {
             const std::string full = render(true);
             const int cur_kv = n_kv();
@@ -274,6 +316,10 @@ int llama_chat(int argc, char ** argv) {
             LOG("%s", piece.c_str());
             response += piece;
             n_gen++;
+            if (params.raw_chat && response.size() >= 5 &&
+                    response.compare(response.size() - 5, 5, "User:") == 0) {
+                break;
+            }
         }
 
         g_generating = false;
@@ -282,7 +328,9 @@ int llama_chat(int argc, char ** argv) {
         am.role    = "assistant";
         am.content = response;
         msgs.push_back(am);
-        prev_render = render(false);
+        if (!params.raw_chat) {
+            prev_render = render(false);
+        }
 
         LOG("\n");
         return ok;

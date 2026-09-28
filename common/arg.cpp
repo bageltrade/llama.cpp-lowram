@@ -2431,10 +2431,24 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_NO_HOST"));
     add_opt(common_arg(
+        {"--think"},
+        "allow thinking tokens (suppressed by --ultra-low, put after it to re-enable)",
+        [](common_params & params) {
+            params.no_think = false;
+        }
+    ).set_env("LLAMA_ARG_THINK"));
+    add_opt(common_arg(
+        {"--raw"},
+        "raw prompt mode for llama-chat, no chat template (put last)",
+        [](common_params & params) {
+            params.raw_chat = true;
+        }
+    ).set_env("LLAMA_ARG_RAW"));
+    add_opt(common_arg(
         {"--ultra-low", "--low-ram"},
         "ultra low RAM: stream Q4 from disk, 64MB prefetch, no repack copies,\n"
         "high ctx ok with q4_0 KV, flash attn on, lazy on, mmap (put last),\n"
-        "no prompt cache/checkpoints, bg reclaim on (LLAMA_MMAP_COLD=0 off)",
+        "no prompt cache/checkpoints, no think tokens, bg reclaim on (LLAMA_MMAP_COLD=0 off)",
         [](common_params & params) {
             params.ultra_low = true;
             // no fit probe: it loads the model and allocates a full second
@@ -2961,7 +2975,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             if (is_truthy(value)) {
                 params.fit_params = true;
             } else if (is_falsey(value)) {
-                params.fit_params = false;
+            params.fit_params = false;
+            // suppress <think> tokens so the model answers directly
+            params.no_think = true;
             } else {
                 throw std::runtime_error(
                     string_format("error: unknown value for --fit: '%s'\n", value.c_str()));
